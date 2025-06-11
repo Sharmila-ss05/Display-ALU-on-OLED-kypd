@@ -1,0 +1,216 @@
+module top_module(
+input clk,
+    input rst,
+    input [3:0] row,
+    output [3:0] col,
+    output sclk,
+    output mosi,
+    output cs,
+    output dc,
+    output res_n,
+    output vccen,
+    output pmoden
+);
+
+    //---- Keypad wires
+    wire [3:0] key;
+    wire key_valid;
+    wire clk_1kHz;
+    
+    //---- ALU FSM
+    reg signed [8:0] result = 0;
+    reg [3:0] operand1 = 0, operand2 = 0;
+    reg [1:0] state = 0;
+    reg [3:0] operator = 0;
+    reg calc_done = 0;
+    
+    //---- Clock divider for keypad debounce
+    clk_divider clkdiv (.clk_100MHz(clk), .reset(rst), .clk_1kHz(clk_1kHz));
+    keypad keypad_inst (
+        .clk(clk_1kHz),
+        .rst(rst),
+        .row(row),
+        .col(col),
+        .key(key),
+        .key_valid(key_valid)
+    );
+
+    //--- ALU FSM
+    always @(posedge clk_1kHz or posedge rst) begin
+        if (rst) begin
+            operand1 <= 0;
+            operand2 <= 0;
+            result <= 0;
+            state <= 0;
+            operator <= 0;
+            calc_done <= 0;
+        end else if (key_valid) begin
+            case (state)
+                0: if (key <= 4'd9) begin
+                        operand1 <= key;
+                        state <= 1; calc_done <= 0;
+                    end
+                1: if (key >= 4'hA && key <= 4'hD) begin
+                        operator <= key;
+                        state <= 2;
+                    end
+                2: if (key <= 4'd9) begin
+                        operand2 <= key;
+                        case (operator)
+                            4'hA: result <= operand1 + key;
+                            4'hB: result <= operand1 - key;
+                            4'hC: result <= operand1 * key;
+                            4'hD: result <= (key != 0) ? operand1 / key : 9'd99;
+                            default: result <= 0;
+                        endcase
+                        calc_done <= 1;
+                        state <= 0;
+                    end
+            endcase
+        end
+    end
+
+    //--- Split result into sign and BCD digits
+    reg is_negative; reg [7:0] abs_result;
+    reg [3:0] res_hund, res_tens, res_ones;
+    always @(*) begin
+        is_negative = (result < 0);
+        abs_result = is_negative ? -result[7:0] : result[7:0];
+        res_hund = abs_result / 100;
+        res_tens = (abs_result / 10) % 10;
+        res_ones = abs_result % 10;
+    end
+    
+    // -------------- OLED SECTION (12x16 font) --------------
+    localparam DIGIT_W = 14; // 12 px font + 2 px space
+    localparam DIGIT_H = 16;
+    localparam DIGITS = 4; // sign, h, t, o
+    localparam COL_START = 20; // Centered for 96px with 4*14=56px
+    localparam ROW_START = 24;
+    reg [4:0] draw_state = 0;
+    reg [15:0] pixel_cnt = 0;
+    reg [7:0] draw_spi_data = 0;
+    reg draw_spi_start = 0;
+    reg draw_dc = 0;
+    reg drawing = 0;
+    reg done = 0;
+    reg [5:0] row_oled = 0, col_oled = 0;
+    reg [3:0] char_idx = 0, char_col = 0;
+    reg [1:0] digit_sel = 0;
+    wire [11:0] font_bits;
+    wire sclk_int, mosi_int, cs_int, dc_init, res_n_init;
+    wire spi_done;
+    wire [7:0] spi_data;
+    wire spi_start;
+    wire init_done;
+
+    ssd1331_init oled_init (
+        .clk(clk), .rst(rst),
+        .spi_data(spi_data), .spi_start(spi_start), .spi_done(spi_done),
+        .dc(dc_init), .res_n(res_n_init), .init_done(init_done)
+    );
+
+    spi_master spi (
+        .clk(clk), .rst(rst),
+        .data_in(drawing ? draw_spi_data : spi_data),
+        .start(drawing ? draw_spi_start : spi_start),
+        .sclk(sclk_int), .mosi(mosi_int), .cs(cs_int), .done(spi_done)
+    );
+
+    font_rom_superbold font(
+        .char_idx(char_idx),
+        .row(row_oled[3:0]),
+        .bits(font_bits)
+    );
+    reg prev_calc_done = 0;
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            draw_state <= 0; draw_spi_data <= 0; draw_spi_start <= 0;
+            draw_dc <= 0; drawing <= 0; done <= 0; pixel_cnt <= 0;
+            row_oled <= 0; col_oled <= 0; digit_sel <= 0; prev_calc_done <= 0;
+        end else begin
+            prev_calc_done <= calc_done;
+            if (calc_done && !prev_calc_done) begin
+                done <= 0; draw_state <= 0; pixel_cnt <= 0;
+                row_oled <= 0; col_oled <= 0; digit_sel <= 0;
+            end
+            if (init_done && (!done)) begin
+                drawing <= 1;
+                case(draw_state)
+                
+                    // 1. Fill screen black
+                    0: begin draw_spi_data <= 8'h15; draw_spi_start <= 1; draw_dc <= 0; draw_state <= 1; end
+                    1: begin draw_spi_start <= 0; if (spi_done) begin draw_spi_data <= 8'd0; draw_spi_start <= 1; draw_state <= 2; end end
+                    2: begin draw_spi_start <= 0; if (spi_done) begin draw_spi_data <= 8'd95; draw_spi_start <= 1; draw_state <= 3; end end
+                    3: begin draw_spi_start <= 0; if (spi_done) begin draw_spi_data <= 8'h75; draw_spi_start <= 1; draw_state <= 4; end end
+                    4: begin draw_spi_start <= 0; if (spi_done) begin draw_spi_data <= 8'd0; draw_spi_start <= 1; draw_state <= 5; end end
+                    5: begin draw_spi_start <= 0; if (spi_done) begin draw_spi_data <= 8'd63; draw_spi_start <= 1; draw_state <= 6; end end
+                    6: begin draw_spi_start <= 0; if (spi_done) begin draw_dc <= 1; pixel_cnt <= 0; draw_state <= 7; end end
+                    7: begin
+                        if(pixel_cnt < 96*64) begin
+                            draw_spi_data <= 8'h00; draw_spi_start <= 1; draw_state <= 8;
+                        end else begin
+                            draw_state <= 20;
+                        end
+                    end
+                    8: begin draw_spi_start <= 0; if (spi_done) begin draw_spi_data <= 8'h00; draw_spi_start <= 1; draw_state <= 9; end end
+                    9: begin draw_spi_start <= 0; if (spi_done) begin pixel_cnt <= pixel_cnt + 1; draw_state <= 7; end end
+
+                    // 2. Draw super-bold digits
+                    20: begin draw_spi_data <= 8'h15; draw_spi_start <= 1; draw_dc <= 0; draw_state <= 21; end
+                    21: begin draw_spi_start <= 0; if (spi_done) begin draw_spi_data <= COL_START; draw_spi_start <= 1; draw_state <= 22; end end
+                    22: begin draw_spi_start <= 0; if (spi_done) begin draw_spi_data <= COL_START+DIGIT_W*DIGITS-1; draw_spi_start <= 1; draw_state <= 23; end end
+                    23: begin draw_spi_start <= 0; if (spi_done) begin draw_spi_data <= 8'h75; draw_spi_start <= 1; draw_state <= 24; end end
+                    24: begin draw_spi_start <= 0; if (spi_done) begin draw_spi_data <= ROW_START; draw_spi_start <= 1; draw_state <= 25; end end
+                    25: begin draw_spi_start <= 0; if (spi_done) begin draw_spi_data <= ROW_START+DIGIT_H-1; draw_spi_start <= 1; draw_state <= 26; end end
+                    26: begin draw_spi_start <= 0; if (spi_done) begin draw_dc <= 1; row_oled <= 0; col_oled <= 0; digit_sel <= 0; draw_state <= 27; end end
+                    27: begin // Each pixel in 4*14x16 region
+                        if(row_oled < DIGIT_H) begin
+                            if(col_oled < DIGIT_W*DIGITS) begin
+                                digit_sel = col_oled / DIGIT_W;
+                                char_col = col_oled % DIGIT_W;
+                                case(digit_sel)
+                                    2'd0: char_idx = is_negative ? 4'd10 : res_hund;
+                                    2'd1: char_idx = res_hund;
+                                    2'd2: char_idx = res_tens;
+                                    2'd3: char_idx = res_ones;
+                                    default: char_idx = 4'd10;
+                                endcase
+                                if (char_col < 12 && font_bits[11-char_col])
+                                    draw_spi_data <= 8'hFF;
+                                else
+                                    draw_spi_data <= 8'h00;
+                                draw_spi_start <= 1;
+                                draw_state <= 28;
+                            end else begin
+                                col_oled <= 0;
+                                row_oled <= row_oled + 1;
+                            end
+                        end else begin
+                            draw_state <= 99;
+                        end
+                    end
+                    28: begin draw_spi_start <= 0; if (spi_done) begin
+                            if (draw_spi_data == 8'hFF)
+                                draw_spi_data <= 8'hFF;
+                            else
+                                draw_spi_data <= 8'h00;
+                            draw_spi_start <= 1;
+                            draw_state <= 29;
+                    end end
+                    29: begin draw_spi_start <= 0; if (spi_done) begin col_oled <= col_oled + 1; draw_state <= 27; end end
+                    99: begin done <= 1; drawing <= 0; end
+                    default: draw_state <= 0;
+                endcase
+            end
+        end
+    end
+    assign sclk   = sclk_int;
+    assign mosi   = mosi_int;
+    assign cs     = cs_int;
+    assign dc     = drawing ? draw_dc : dc_init;
+    assign res_n  = res_n_init;
+    assign vccen  = 1'b1;
+    assign pmoden = 1'b1;
+endmodule
+
