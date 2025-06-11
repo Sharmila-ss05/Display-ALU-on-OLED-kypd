@@ -1,0 +1,57 @@
+module keypad(
+    input clk,
+    input rst,
+    input [3:0] row,
+    output reg [3:0] col,
+    output reg [3:0] key,
+    output reg key_valid
+);
+    reg [1:0] col_index;
+
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            col_index <= 0;
+            col <= 4'b1110;
+        end else begin
+            col_index <= col_index + 1;
+            col <= ~(4'b0001 << col_index);
+        end
+    end
+
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            key <= 0;
+            key_valid <= 0;
+        end else begin
+            key_valid <= 0;
+            case (~col)
+                4'b0001: begin
+                    if (!row[0]) begin key <= 4'h1; key_valid <= 1; end
+                    else if (!row[1]) begin key <= 4'h4; key_valid <= 1; end
+                    else if (!row[2]) begin key <= 4'h7; key_valid <= 1; end
+                    else if (!row[3]) begin key <= 4'h0; key_valid <= 1; end
+                end
+                4'b0010: begin
+                    if (!row[0]) begin key <= 4'h2; key_valid <= 1; end
+                    else if (!row[1]) begin key <= 4'h5; key_valid <= 1; end
+                    else if (!row[2]) begin key <= 4'h8; key_valid <= 1; end
+                    else if (!row[3]) begin key <= 4'hF; key_valid <= 1; end
+                end
+                4'b0100: begin
+                    if (!row[0]) begin key <= 4'h3; key_valid <= 1; end
+                    else if (!row[1]) begin key <= 4'h6; key_valid <= 1; end
+                    else if (!row[2]) begin key <= 4'h9; key_valid <= 1; end
+                    else if (!row[3]) begin key <= 4'hE; key_valid <= 1; end
+                end
+                4'b1000: begin
+                    if (!row[0]) begin key <= 4'hA; key_valid <= 1; end
+                    else if (!row[1]) begin key <= 4'hB; key_valid <= 1; end
+                    else if (!row[2]) begin key <= 4'hC; key_valid <= 1; end
+                    else if (!row[3]) begin key <= 4'hD; key_valid <= 1; end
+                end
+            endcase
+        end
+    end
+endmodule
